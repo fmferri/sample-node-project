@@ -1,0 +1,123 @@
+name: Apply a Tenant
+run-name: |
+  ${{ format('Deploying {0} {1}by @{2}',
+      github.event.inputs.tenant,
+      github.event.inputs.service == '' && '' ||
+        format('selecting {0}{1}{2}{3} ',
+          github.event.inputs.service,
+          github.event.inputs.image_tag == '' && '' || ':',
+          github.event.inputs.image_tag,
+          github.event.inputs.migrate_db == 'true' && ' with DB migrations' || ''),
+      github.actor) }}
+
+concurrency:
+  group: ${{ github.ref_name }}
+  cancel-in-progress: false
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: environment
+        required: true
+      tenant:
+        description: "The tenant in which you want to apply"
+        required: true
+      service:
+        description: "The service you want to apply"
+        required: false
+        type: string
+      image_tag:
+        description: The new image tag to deploy
+      migrate_db:
+        default: false
+        description: "Migrate the database for this service"
+        type: boolean
+
+jobs:
+  run-apply:
+    name: Run Apply
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: "read"
+      id-token: "write"
+    if: ${{ github.ref_name == 'main' || !contains(inputs.environment, 'prod') }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/init-kubernetes-access
+        with:
+          cluster_name: ${{ inputs.environment }}
+          workload_identity_provider: ${{ vars.workload_identity_provider }}
+          gcp_service_account: ${{ vars.GCLOUD_EMAIL }}
+          gcloud_project: ${{ vars.gcloud_project }}
+          gcloud_region: ${{  vars.gcloud_region }}
+          environment: ${{ inputs.environment }}
+          tailscale_oauth_client_id: ${{ secrets.TAILSCALE_OAUTH_CLIENT_ID }}
+          tailscale_oauth_secret: ${{ secrets.TAILSCALE_OAUTH_SECRET }}
+
+      - name: Validate parameters
+        id: validate_params
+        run: |
+          ARGS_OUT="--file tenants/${{ inputs.environment }}/${{ inputs.tenant }}.yaml --environment ${{ inputs.environment }} --log-level error"
+
+          if [[ ! -f tenants/${{ inputs.environment }}/${{ inputs.tenant }}.yaml ]]; then
+            echo "Helmfile for ${{ inputs.tenant }} does not exist. \
+                  Create tenants/${{ inputs.environment }}/${{ inputs.tenant }}.yaml"
+            exit 1
+          fi
+
+          helmfile repos $ARGS_OUT
+
+          if [[ -n "${{ inputs.service }}" ]]; then
+            ARGS_OUT="$ARGS_OUT --selector name=${{inputs.service}}"
+          fi
+
+          BUILT_HELMFILE="$(helmfile build $ARGS_OUT)"
+
+          if [[ -n "${{ inputs.image_tag }}" ]]; then
+            SET="--set image.tag=${{inputs.image_tag}} --set migrate.enabled=${{ toJSON(inputs.migrate_db) }}"
+            ARGS_OUT="$SET $ARGS_OUT"
+            echo "set=$SET" >> $GITHUB_OUTPUT
+          fi
+
+          ARGS_OUT="$ARGS_OUT --no-hooks"
+
+          echo "helmfile_args=$ARGS_OUT" >> $GITHUB_OUTPUT
+
+      - name: helmfile apply
+        run: |
+          set -eo pipefail
+
+          helmfile apply \
+            ${{ steps.validate_params.outputs.helmfile_args }} | \
+          tee raw_comment.txt
+
+          python .github/format_github_comment.py raw_comment.txt \
+            --env ${{ inputs.environment }} \
+            --outfile "$GITHUB_STEP_SUMMARY"
+
+      - name: checkout newest ref of main
+        if: ${{ inputs.image_tag != '' && inputs.service != '' }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+          ssh-key: "${{ secrets.DEPLOY_KEY }}"
+
+      - name: Write image tag to helm_vars
+        if: ${{ inputs.image_tag != '' && inputs.service != '' }}
+        run: >
+          mkdir -pv
+          "helm_vars/${{ inputs.environment }}/${{ inputs.tenant }}/${{ inputs.service }}/"
+
+          touch
+          "helm_vars/${{ inputs.environment }}/${{ inputs.tenant }}/${{ inputs.service }}/values.yaml"
+
+          yq -i '.image.tag |= "${{ inputs.image_tag }}"'
+          "helm_vars/${{ inputs.environment }}/${{ inputs.tenant }}/${{ inputs.service }}/values.yaml"
+
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        if: ${{ inputs.image_tag != '' && inputs.service != '' }}
+        with:
+          commit_message: "${{ inputs.environment }}: ${{ inputs.tenant }}: ${{ inputs.service }}: bump image tag to ${{ inputs.image_tag }}"

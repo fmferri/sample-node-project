@@ -1,0 +1,53 @@
+name: Docker
+
+# This workflow uses actions that are not certified by GitHub.
+# They are provided by a third-party and are governed by
+# separate terms of service, privacy policy, and support
+# documentation.
+
+on: push
+
+env:
+  # Use docker.io for Docker Hub if empty
+  # github.repository as <account>/<repo>
+  SERVICE: HTTP-Gateway
+
+jobs:
+  build:
+
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # This is used to complete the identity challenge
+      # with sigstore/fulcio when running outside of PRs.
+      id-token: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+
+
+      - name: Create Docker Tags
+        id: vars
+        run: |
+          REF_NAME_SANITIZED="$(tr -c '[:alnum:][:cntrl:].' "-" <<< '${{github.ref_name}}')"
+          echo $REF_NAME_SANITIZED
+          echo "ref_name_sanitized=$REF_NAME_SANITIZED" >> $GITHUB_OUTPUT
+           if [[ "${{ github.ref_name }}" =~ v([0-9]+\.?)+.* ]]; then
+            export SEMVER="$(grep -oE '([0-9]+\.?)+.*' <<< '${{ github.ref_name }}')"
+            echo $SEMVER
+            echo "semver_full=$SEMVER" >> $GITHUB_OUTPUT
+            echo "semver_minor=$(cut -f1,2 -d\. <<< $SEMVER)" >> $GITHUB_OUTPUT
+            echo "semver_major=$(cut -f1 -d\. <<< $SEMVER)" >> $GITHUB_OUTPUT
+            echo $GITHUB_OUTPUT
+          fi
+          
+      - name: Publish to Dockerhub
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: elgohr/Publish-Docker-Github-Action@v5
+        with:
+          name: catenatedevops/httpgateway
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+          tag_semver: true
