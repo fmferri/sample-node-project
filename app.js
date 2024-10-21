@@ -21,5 +21,5 @@ HTTP SERVER OLUŞTURULDU
 
 */
 http.createServer(app).listen(app.get('port'), function(){
-	console.log('Sistem ' + app.get('port') + ' Listening on Port again.');
+	console.log('Sistem ' + app.get('port') + ' Listening on Port again and again.');
 });
